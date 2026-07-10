@@ -23,7 +23,7 @@ name: agent-guard
 #     forbidden-file PR lands as a RED required check and is unmergeable).
 #
 # BEFORE ENABLING:
-#   * Pin <REPLACE_WITH_CHECKOUT_SHA> and <REPLACE_WITH_AGENT_RUNNER_COMMIT_SHA>.
+#   * Pin <REPLACE_WITH_CHECKOUT_SHA> and b23a5d7ff270feae21909b3c31be36b73285cb1b.
 #   * If Stitch-TEC/agent-runner is PRIVATE, add repo secret
 #     AGENT_RUNNER_READ_TOKEN (a read-only, agent-runner-scoped fine-grained PAT);
 #     the fetch below uses it automatically and works unauthenticated if public.
@@ -52,7 +52,7 @@ jobs:
 
       - name: Fetch the pinned guard script from Stitch-TEC/agent-runner
         env:
-          GUARD_SHA: <REPLACE_WITH_AGENT_RUNNER_COMMIT_SHA>
+          GUARD_SHA: b23a5d7ff270feae21909b3c31be36b73285cb1b
           # Present only if agent-runner is private; empty (harmless) if public.
           AGENT_RUNNER_READ_TOKEN: ${{ secrets.AGENT_RUNNER_READ_TOKEN }}
         run: |
