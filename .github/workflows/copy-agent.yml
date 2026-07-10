@@ -1,0 +1,389 @@
+name: copy-agent
+
+# =============================================================================
+# Stitch copy-lane AGENT RUNNER  (Stitch-TEC/agent-runner)
+# -----------------------------------------------------------------------------
+# The sandboxed execution half of the tickets -> agent-PR copy-lane machinery.
+# The dispatcher (feedback-worker /agent/dispatch) fires a repository_dispatch
+# of type `stitch-agent-copy` at THIS repo with a client_payload of:
+#   { ticketId, repo:"owner/name", runId, nonces:{readToken,brief,gitToken,
+#     complete}, runBudgetUsd, gatewayToken }
+#
+# SECURITY MODEL (do not weaken):
+#   * This repo is Stitch-OWNED. The TARGET client repo is only ever *checked
+#     out* with a short-lived, step-scoped App token. Agent logic never lives in
+#     a client-editable workflow.
+#   * Callbacks are authenticated OIDC-PRIMARY + purpose-nonce-second-factor.
+#     Every callback presents this run's GitHub Actions OIDC token (audience =
+#     AGENT_OIDC_AUDIENCE) PLUS the purpose-bound nonce from the payload. A
+#     leaked nonce alone mints nothing; a genuine OIDC token alone mints nothing.
+#   * Phase A runs Claude Code in a DOCKER FILESYSTEM JAIL that mounts ONLY the
+#     target checkout. $GITHUB_EVENT_PATH (nonces + gatewayToken), the other
+#     minted tokens, and the on-disk guard script are NOT mounted and NOT in the
+#     container env -- a prompt-injected agent can neither lift the payload
+#     secrets nor overwrite the guard.
+#   * The copy path-guard (scripts/check-copy-diff.sh) runs ON THE HOST, outside
+#     the container, so the agent cannot have altered it.
+#   * The WRITE (contents+PR) token is minted ONLY at Phase B via /agent/git-token
+#     -- never in the repository_dispatch payload, never in Phase A, never logged.
+#
+# BEFORE ENABLING (operator / see README.md):
+#   1. Pin every `<REPLACE_WITH_*_SHA>` to a real full 40-char commit SHA.
+#   2. Set env CLAUDE_CODE_IMAGE below to a PUBLISHED Claude Code CLI image
+#      pinned by @sha256:<digest> (do NOT use a floating tag).
+#   3. Set repo vars DISPATCHER_URL and AGENT_OIDC_AUDIENCE.
+# =============================================================================
+
+on:
+  repository_dispatch:
+    types: [stitch-agent-copy]
+
+# ONLY id-token:write -- this is the load-bearing top-level grant. It lets the
+# job request an OIDC token for callback auth and gives the job's own
+# GITHUB_TOKEN NO write and NO client-repo reach. (Each job additionally needs
+# contents:read to read THIS private repo's own guard script -- granted at the
+# job level below, where it is scoped to agent-runner only and can never touch a
+# client repo.)
+permissions:
+  id-token: write
+
+# One in-flight run per runId; never cancel an agent mid-edit or mid-PR.
+concurrency:
+  group: stitch-run-${{ github.event.client_payload.runId }}
+  cancel-in-progress: false
+
+env:
+  # --- OPERATOR: pin this to a published Claude Code CLI image by digest. ------
+  # The image ENTRYPOINT must be the Claude Code CLI so the flags below apply.
+  # Example shape only -- replace the whole value, keep the @sha256 pin:
+  CLAUDE_CODE_IMAGE: REPLACE_WITH_CLAUDE_CODE_IMAGE@sha256:REPLACE_WITH_IMAGE_DIGEST
+
+jobs:
+  # ===========================================================================
+  # PHASE A -- generate the prose diff inside a filesystem jail. No write token.
+  # ===========================================================================
+  agent:
+    runs-on: ubuntu-latest
+    # Hard wall-clock cap: the dispatcher's ledger reserves ~15 Actions-minutes of headroom per run
+    # ($0.12), so a hung step must not run to GitHub's 6-HOUR default. 12 here + 6 in open_pr keeps a
+    # run's real Actions minutes near the reservation (server-side reconcile caps the charge anyway).
+    timeout-minutes: 12
+    # contents:read is scoped to agent-runner (this repo) ONLY -- required to
+    # check out our own guard script. It grants nothing on any client repo.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      DISPATCHER_URL: ${{ vars.DISPATCHER_URL }}
+      VAR_AUD: ${{ vars.AGENT_OIDC_AUDIENCE }}
+    steps:
+      # --- our own guard + scripts (stays in the workspace, NOT in the mount) --
+      - name: Checkout agent-runner (guard scripts)
+        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        with:
+          persist-credentials: false
+
+      # --- OIDC + read-token nonce -> contents:read token --------------------
+      - name: Fetch read token (OIDC + read-token nonce)
+        id: read_token
+        env:
+          PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          REPO: ${{ github.event.client_payload.repo }}
+          NONCE: ${{ github.event.client_payload.nonces.readToken }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$NONCE"
+          AUD="${PAYLOAD_AUD:-$VAR_AUD}"
+          [ -n "$AUD" ] || { echo "::error::no OIDC audience (set repo var AGENT_OIDC_AUDIENCE)"; exit 1; }
+          OIDC="$(curl -sS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" | jq -r '.value // empty')"
+          [ -n "$OIDC" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$OIDC"
+          RESP="$(curl -sS --max-time 30 -X POST "$DISPATCHER_URL/agent/read-token" \
+            -H "Authorization: Bearer $OIDC" \
+            -H "X-Stitch-Nonce: $NONCE" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg r "$RUN_ID" --arg repo "$REPO" '{runId:$r,repo:$repo}')")"
+          TOKEN="$(printf '%s' "$RESP" | jq -r '.token // empty')"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::read-token callback failed: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # --- checkout the client repo, read-only, into the workspace -----------
+      - name: Checkout target repo (read-only)
+        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          token: ${{ steps.read_token.outputs.token }}
+          path: target
+          persist-credentials: false
+          fetch-depth: 1
+
+      # --- isolate the checkout into RUNNER_TEMP so the mount contains ONLY the
+      #     target repo -- keeping the guard script and $GITHUB_EVENT_PATH (which
+      #     lives under $RUNNER_TEMP/_github_workflow/) out of the container.
+      - name: Isolate checkout for the FS jail
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/target"
+          mv "$GITHUB_WORKSPACE/target" "$RUNNER_TEMP/target"
+          # Make the copy writable by any container uid (we run --user 1000).
+          chmod -R a+rwX "$RUNNER_TEMP/target"
+
+      # --- OIDC + brief nonce -> operator-authored instruction + context -----
+      #     NO ticket subject/body ever reaches the agent (DECISIONS LOCKED #2).
+      - name: Fetch operator brief (OIDC + brief nonce)
+        env:
+          PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          REPO: ${{ github.event.client_payload.repo }}
+          NONCE: ${{ github.event.client_payload.nonces.brief }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$NONCE"
+          AUD="${PAYLOAD_AUD:-$VAR_AUD}"
+          [ -n "$AUD" ] || { echo "::error::no OIDC audience"; exit 1; }
+          OIDC="$(curl -sS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" | jq -r '.value // empty')"
+          [ -n "$OIDC" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$OIDC"
+          RESP="$(curl -sS --max-time 30 -X POST "$DISPATCHER_URL/agent/brief" \
+            -H "Authorization: Bearer $OIDC" \
+            -H "X-Stitch-Nonce: $NONCE" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg r "$RUN_ID" --arg repo "$REPO" '{runId:$r,repo:$repo}')")"
+          INSTR_FILE="$RUNNER_TEMP/instruction.txt"
+          CTX_FILE="$RUNNER_TEMP/context.txt"
+          printf '%s' "$RESP" | jq -r '.operatorInstruction // ""' > "$INSTR_FILE"
+          printf '%s' "$RESP" | jq -r '.operatorContext // ""' > "$CTX_FILE"
+          if [ ! -s "$INSTR_FILE" ]; then
+            echo "::error::brief callback returned no operator instruction: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          {
+            echo "# Stitch copy brief"
+            echo
+            echo "## Instruction"
+            echo
+            cat "$INSTR_FILE"
+            echo
+            echo "## Context"
+            echo
+            cat "$CTX_FILE"
+          } > "$RUNNER_TEMP/target/.stitch-brief.md"
+          rm -f "$INSTR_FILE" "$CTX_FILE"
+
+      # --- RUN CLAUDE CODE IN THE FS JAIL ------------------------------------
+      #     Only $RUNNER_TEMP/target is mounted (as /work). The gatewayToken is
+      #     passed as the gateway API key; nothing else from the payload is in the
+      #     container env. Tools are read/write-in-tree only: NO Bash/WebFetch/
+      #     git/gh. --cap-drop/no-new-privileges are extra hardening on top of the
+      #     load-bearing single-mount jail.
+      - name: Run Claude Code (filesystem jail)
+        env:
+          GATEWAY_TOKEN: ${{ github.event.client_payload.gatewayToken }}
+          # Trusted, workflow-authored preamble. The operator-authored brief is
+          # DATA the agent reads via its Read tool from /work/.stitch-brief.md.
+          AGENT_PROMPT: >-
+            You are a copy editor with no shell and no network tools. Read the
+            file .stitch-brief.md in the current directory for your instructions
+            and context, then make ONLY the prose/content changes it requests.
+            Edit existing Markdown/text/content files only (.md, .mdx, .txt). Do
+            NOT modify code, configuration, workflows, HTML, SVG, JSON, YAML, or
+            dependencies, and do NOT create new files. Make the smallest change
+            that satisfies the brief.
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$GATEWAY_TOKEN"
+          # NOTE (operator): confirm your pinned image runs non-interactively with
+          # these flags. Some Claude Code versions also need a permission mode
+          # flag (e.g. --permission-mode acceptEdits) to auto-apply edits.
+          timeout 600 docker run --rm \
+            --user 1000 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "$RUNNER_TEMP/target:/work" \
+            -w /work \
+            -e ANTHROPIC_BASE_URL="https://ai.stitchtec.dev" \
+            -e ANTHROPIC_API_KEY="$GATEWAY_TOKEN" \
+            "$CLAUDE_CODE_IMAGE" \
+            --allowedTools "Read Write Edit Glob Grep" \
+            --max-turns 20 \
+            -p "$AGENT_PROMPT"
+
+      # --- HOST-SIDE PATH-GUARD + patch -- structural wall #1 ----------------
+      - name: Guard the diff and produce the patch (fail-closed)
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/target"
+          # Drop the brief so it is never part of the diff/patch (it is untracked
+          # anyway, but be explicit).
+          rm -f "$T/.stitch-brief.md"
+          # Prose-only path + size guard, run OUTSIDE the container against the
+          # agent's edits. The agent could not have touched this script.
+          ( cd "$T" && git diff --name-only --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          # The guarded diff IS the shipped patch (byte-for-byte).
+          git -C "$T" diff --no-renames > "$RUNNER_TEMP/copy.patch"
+          if [ ! -s "$RUNNER_TEMP/copy.patch" ]; then
+            echo "::error::agent produced no prose changes -- nothing to open a PR for"
+            exit 1
+          fi
+
+      - name: Upload copy patch
+        uses: actions/upload-artifact@<REPLACE_WITH_UPLOAD_ARTIFACT_SHA>   # actions/upload-artifact v4.4.3 -> pin full commit SHA
+        with:
+          name: copy-patch
+          path: ${{ runner.temp }}/copy.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  # ===========================================================================
+  # PHASE B -- open the PR with a write token minted only now. needs: agent.
+  # ===========================================================================
+  open_pr:
+    needs: agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 6   # wall-clock cap (see the agent job) — checkout+apply+push+PR is quick
+    permissions:
+      id-token: write
+      contents: read   # agent-runner (own guard script) only; never a client repo
+    env:
+      DISPATCHER_URL: ${{ vars.DISPATCHER_URL }}
+      VAR_AUD: ${{ vars.AGENT_OIDC_AUDIENCE }}
+    steps:
+      - name: Checkout agent-runner (guard scripts)
+        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        with:
+          persist-credentials: false
+
+      - name: Download copy patch
+        uses: actions/download-artifact@<REPLACE_WITH_DOWNLOAD_ARTIFACT_SHA>   # actions/download-artifact v4.1.8 -> pin full commit SHA
+        with:
+          name: copy-patch
+          path: ${{ runner.temp }}
+
+      # --- OIDC + SINGLE-USE git-token nonce -> contents+PR:write token ------
+      #     Dispatcher re-verifies run state + branch protected===true at mint.
+      - name: Fetch write token (OIDC + git-token nonce)
+        id: write_token
+        env:
+          PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          REPO: ${{ github.event.client_payload.repo }}
+          NONCE: ${{ github.event.client_payload.nonces.gitToken }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$NONCE"
+          AUD="${PAYLOAD_AUD:-$VAR_AUD}"
+          [ -n "$AUD" ] || { echo "::error::no OIDC audience"; exit 1; }
+          OIDC="$(curl -sS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" | jq -r '.value // empty')"
+          [ -n "$OIDC" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$OIDC"
+          RESP="$(curl -sS --max-time 30 -X POST "$DISPATCHER_URL/agent/git-token" \
+            -H "Authorization: Bearer $OIDC" \
+            -H "X-Stitch-Nonce: $NONCE" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg r "$RUN_ID" --arg repo "$REPO" '{runId:$r,repo:$repo}')")"
+          TOKEN="$(printf '%s' "$RESP" | jq -r '.token // empty')"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::git-token callback failed: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target repo (write)
+        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          token: ${{ steps.write_token.outputs.token }}
+          path: target
+          persist-credentials: true
+          fetch-depth: 1
+
+      # --- branch, apply, RE-GUARD (wall #2), commit (TRUSTED msg), push -----
+      - name: Apply patch on a branch and push
+        env:
+          TICKET_ID: ${{ github.event.client_payload.ticketId }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+        run: |
+          set -euo pipefail
+          T="$GITHUB_WORKSPACE/target"
+          SAFE_TICKET="$(printf '%s' "$TICKET_ID" | tr -cd 'A-Za-z0-9._-')"
+          [ -n "$SAFE_TICKET" ] || { echo "::error::empty/invalid ticketId"; exit 1; }
+          BASE="$(git -C "$T" symbolic-ref --short HEAD)"
+          BRANCH="stitch/agent/ticket-$SAFE_TICKET"
+          git -C "$T" checkout -b "$BRANCH"
+          git -C "$T" apply --whitespace=nowarn "$RUNNER_TEMP/copy.patch"
+          # Structural wall #2: the SAME guard, post-apply, defense in depth.
+          ( cd "$T" && git diff --name-only --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          git -C "$T" add -A
+          # TRUSTED, workflow-authored commit message -- never agent free-text.
+          git -C "$T" -c user.name="Stitch Agent" -c user.email="agent@stitchtec.dev" \
+            commit -m "Stitch copy-lane change (ticket ${SAFE_TICKET})" \
+                   -m "Automated prose-only edit. Run ${RUN_ID}. Requires human review; the agent cannot merge."
+          git -C "$T" push origin "$BRANCH"
+          {
+            echo "BASE=$BASE"
+            echo "BRANCH=$BRANCH"
+            echo "SAFE_TICKET=$SAFE_TICKET"
+          } >> "$GITHUB_ENV"
+
+      - name: Open pull request (trusted banner + labels)
+        env:
+          GH_TOKEN: ${{ steps.write_token.outputs.token }}
+          REPO: ${{ github.event.client_payload.repo }}
+        run: |
+          set -euo pipefail
+          # Build the body with indented printf lines (a heredoc's column-1 body
+          # would break this YAML literal block). The banner text is TRUSTED and
+          # workflow-authored -- never agent free-text.
+          BODY="$(printf '%s\n' \
+            '> **UNREVIEWED — assume hostile until you read every line.**' \
+            '> Copy-lane change (prose only). The agent opened this; it cannot merge.' \
+            '' \
+            "This pull request was opened automatically by the Stitch copy-lane agent for ticket ${SAFE_TICKET}. It contains prose-only changes (Markdown / text / content) that passed the copy path-guard. Review every changed line before merging. The agent has no merge capability — a human must approve and merge.")"
+          PR_URL="$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
+            --title "Copy-lane change · ticket ${SAFE_TICKET} (unreviewed)" \
+            --body "$BODY")"
+          # Labels are cosmetic (the banner + branch are the real signal); do not
+          # fail the run if they do not exist yet in the repo.
+          gh pr edit "$PR_URL" --repo "$REPO" --add-label "agent-copy" --add-label "unreviewed" \
+            || echo "::warning::could not add labels (create 'agent-copy' and 'unreviewed' in the repo)"
+          echo "PR_URL=$PR_URL" >> "$GITHUB_ENV"
+
+      # --- OIDC + its OWN single-use complete nonce -> /agent/complete -------
+      #     { runId, prUrl } only. NO durationSec (minutes are server-derived).
+      - name: Complete callback (OIDC + complete nonce)
+        env:
+          PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          REPO: ${{ github.event.client_payload.repo }}
+          NONCE: ${{ github.event.client_payload.nonces.complete }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$NONCE"
+          AUD="${PAYLOAD_AUD:-$VAR_AUD}"
+          [ -n "$AUD" ] || { echo "::error::no OIDC audience"; exit 1; }
+          OIDC="$(curl -sS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" | jq -r '.value // empty')"
+          [ -n "$OIDC" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$OIDC"
+          RESP="$(curl -sS --max-time 30 -X POST "$DISPATCHER_URL/agent/complete" \
+            -H "Authorization: Bearer $OIDC" \
+            -H "X-Stitch-Nonce: $NONCE" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg r "$RUN_ID" --arg u "$PR_URL" '{runId:$r,prUrl:$u}')")"
+          if [ "$(printf '%s' "$RESP" | jq -r '.ok // false')" != "true" ]; then
+            echo "::error::complete callback failed: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+            exit 1
+          fi

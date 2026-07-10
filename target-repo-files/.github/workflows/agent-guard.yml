@@ -1,0 +1,106 @@
+name: agent-guard
+
+# =============================================================================
+# Stitch copy-lane GUARD  (lives in every ENROLLED TARGET repo)
+# -----------------------------------------------------------------------------
+# A REQUIRED status check the copy-lane agent can neither edit nor disable.
+#
+# WHY IT FETCHES THE SCRIPT BY SHA (do NOT change this):
+#   The guard logic is NOT vendored + executed from the PR head. A PR could edit
+#   a `.github/agent-guard/*.sh` copy to `exit 0`, because non-workflow `.github/`
+#   paths are Contents-writable (the Stitch Agent App's lack of the Workflows
+#   permission only protects `.github/workflows/**`). So this job FETCHES
+#   scripts/check-copy-diff.sh PINNED BY FULL COMMIT SHA from
+#   Stitch-TEC/agent-runner and runs THAT against the PR diff. It NEVER executes
+#   a script taken from the PR head. A commit SHA names an IMMUTABLE blob, so the
+#   pin is the integrity guarantee.
+#
+# OPERATOR -- to make this a real wall, on the protected branch (main):
+#   * Add the `guard` job of this workflow as a REQUIRED status check.
+#   * Require >= 1 review and no force-push.
+#   * The "Stitch Agent" GitHub App must NOT be in the branch-protection bypass
+#     list (it has Contents+PR only and no Administration/merge capability, so a
+#     forbidden-file PR lands as a RED required check and is unmergeable).
+#
+# BEFORE ENABLING:
+#   * Pin <REPLACE_WITH_CHECKOUT_SHA> and <REPLACE_WITH_AGENT_RUNNER_COMMIT_SHA>.
+#   * If Stitch-TEC/agent-runner is PRIVATE, add repo secret
+#     AGENT_RUNNER_READ_TOKEN (a read-only, agent-runner-scoped fine-grained PAT);
+#     the fetch below uses it automatically and works unauthenticated if public.
+# =============================================================================
+
+on:
+  pull_request:
+
+# Read-only. This guard needs nothing but the diff.
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR (full history for the base...head diff)
+        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the pinned guard script from Stitch-TEC/agent-runner
+        env:
+          GUARD_SHA: <REPLACE_WITH_AGENT_RUNNER_COMMIT_SHA>
+          # Present only if agent-runner is private; empty (harmless) if public.
+          AGENT_RUNNER_READ_TOKEN: ${{ secrets.AGENT_RUNNER_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEST="$RUNNER_TEMP/check-copy-diff.sh"   # OUTSIDE the PR working tree
+          args=(-sSfL --max-time 30)
+          if [ -n "${AGENT_RUNNER_READ_TOKEN:-}" ]; then
+            args+=(-H "Authorization: Bearer $AGENT_RUNNER_READ_TOKEN")
+          fi
+          curl "${args[@]}" \
+            "https://raw.githubusercontent.com/Stitch-TEC/agent-runner/${GUARD_SHA}/scripts/check-copy-diff.sh" \
+            -o "$DEST"
+          # OPTIONAL stronger pin: verify the script's sha256 the operator records.
+          # echo "<REPLACE_WITH_SCRIPT_SHA256>  $DEST" | sha256sum -c -
+          test -s "$DEST" || { echo "::error::failed to fetch pinned guard script"; exit 1; }
+          chmod +x "$DEST"
+
+      - name: Enforce copy-lane path + size policy (fail-closed)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # numstat over the exact PR range -> paths + line counts for the caps.
+          # Capture first so a git failure fails the job (no fail-open pipe).
+          DIFF="$(git diff --numstat --no-renames "${BASE_SHA}...${HEAD_SHA}")" \
+            || { echo "::error::could not compute PR diff range"; exit 1; }
+          printf '%s\n' "$DIFF" | sh "$RUNNER_TEMP/check-copy-diff.sh"
+
+      - name: Flag new egress hosts added in prose (fail-closed)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Look only at ADDED lines ('+', excluding the '+++' file header) and
+          # flag any http(s) URL. Copy-lane changes must not introduce new links /
+          # egress hosts -- a human adds those directly (fatigue-attack class #16).
+          ADDED="$(git diff --no-renames "${BASE_SHA}...${HEAD_SHA}" \
+                    | { grep -E '^\+' || true; } | { grep -Ev '^\+\+\+' || true; })"
+          HOSTS="$(printf '%s\n' "$ADDED" \
+                    | { grep -oiE 'https?://[A-Za-z0-9._~%-]+' || true; } \
+                    | sed -E 's#^https?://##I' | sort -u)"
+          if [ -n "$HOSTS" ]; then
+            echo "::error::copy-lane PR adds URL/egress host(s) -- a human must add links directly:"
+            printf '%s\n' "$HOSTS" | while IFS= read -r h; do
+              [ -n "$h" ] && echo "::error::  new URL host: $h"
+            done
+            exit 1
+          fi
+          echo "no new egress hosts in added prose -- OK"
