@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR (full history for the base...head diff)
-        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           fetch-depth: 0
           persist-credentials: false

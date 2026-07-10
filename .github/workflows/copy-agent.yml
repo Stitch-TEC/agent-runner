@@ -79,7 +79,7 @@ jobs:
     steps:
       # --- our own guard + scripts (stays in the workspace, NOT in the mount) --
       - name: Checkout agent-runner (guard scripts)
-        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           persist-credentials: false
 
@@ -116,7 +116,7 @@ jobs:
 
       # --- checkout the client repo, read-only, into the workspace -----------
       - name: Checkout target repo (read-only)
-        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           repository: ${{ github.event.client_payload.repo }}
           token: ${{ steps.read_token.outputs.token }}
@@ -236,7 +236,7 @@ jobs:
           fi
 
       - name: Upload copy patch
-        uses: actions/upload-artifact@<REPLACE_WITH_UPLOAD_ARTIFACT_SHA>   # actions/upload-artifact v4.4.3 -> pin full commit SHA
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882   # actions/upload-artifact v4.4.3 -> pin full commit SHA
         with:
           name: copy-patch
           path: ${{ runner.temp }}/copy.patch
@@ -258,12 +258,12 @@ jobs:
       VAR_AUD: ${{ vars.AGENT_OIDC_AUDIENCE }}
     steps:
       - name: Checkout agent-runner (guard scripts)
-        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           persist-credentials: false
 
       - name: Download copy patch
-        uses: actions/download-artifact@<REPLACE_WITH_DOWNLOAD_ARTIFACT_SHA>   # actions/download-artifact v4.1.8 -> pin full commit SHA
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16   # actions/download-artifact v4.1.8 -> pin full commit SHA
         with:
           name: copy-patch
           path: ${{ runner.temp }}
@@ -301,7 +301,7 @@ jobs:
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Checkout target repo (write)
-        uses: actions/checkout@<REPLACE_WITH_CHECKOUT_SHA>   # actions/checkout v4.2.2 -> pin full commit SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           repository: ${{ github.event.client_payload.repo }}
           token: ${{ steps.write_token.outputs.token }}
