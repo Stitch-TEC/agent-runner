@@ -74,8 +74,10 @@ jobs:
       id-token: write
       contents: read
     env:
-      DISPATCHER_URL: ${{ vars.DISPATCHER_URL }}
-      VAR_AUD: ${{ vars.AGENT_OIDC_AUDIENCE }}
+      # Prefer the dispatcher-supplied values (single source of truth); fall back to repo vars only if
+      # the payload omits them (older dispatcher). GitHub's `||` returns the first non-empty operand.
+      DISPATCHER_URL: ${{ github.event.client_payload.dispatcherUrl || vars.DISPATCHER_URL }}
+      VAR_AUD: ${{ github.event.client_payload.oidcAudience || vars.AGENT_OIDC_AUDIENCE }}
     steps:
       # --- our own guard + scripts (stays in the workspace, NOT in the mount) --
       - name: Checkout agent-runner (guard scripts)
@@ -132,6 +134,9 @@ jobs:
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/target"
           mv "$GITHUB_WORKSPACE/target" "$RUNNER_TEMP/target"
+          # Record the EXACT base commit the agent edits against, so Phase B applies the patch to the
+          # SAME base (no drift if the default branch advances mid-run) and branches from it.
+          git -C "$RUNNER_TEMP/target" rev-parse HEAD > "$RUNNER_TEMP/base.sha"
           # Make the copy writable by any container uid (we run --user 1000).
           chmod -R a+rwX "$RUNNER_TEMP/target"
 
@@ -239,7 +244,9 @@ jobs:
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882   # actions/upload-artifact v4.4.3 -> pin full commit SHA
         with:
           name: copy-patch
-          path: ${{ runner.temp }}/copy.patch
+          path: |
+            ${{ runner.temp }}/copy.patch
+            ${{ runner.temp }}/base.sha
           if-no-files-found: error
           retention-days: 1
 
@@ -254,8 +261,8 @@ jobs:
       id-token: write
       contents: read   # agent-runner (own guard script) only; never a client repo
     env:
-      DISPATCHER_URL: ${{ vars.DISPATCHER_URL }}
-      VAR_AUD: ${{ vars.AGENT_OIDC_AUDIENCE }}
+      DISPATCHER_URL: ${{ github.event.client_payload.dispatcherUrl || vars.DISPATCHER_URL }}
+      VAR_AUD: ${{ github.event.client_payload.oidcAudience || vars.AGENT_OIDC_AUDIENCE }}
     steps:
       - name: Checkout agent-runner (guard scripts)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
@@ -319,10 +326,18 @@ jobs:
           T="$GITHUB_WORKSPACE/target"
           SAFE_TICKET="$(printf '%s' "$TICKET_ID" | tr -cd 'A-Za-z0-9._-')"
           [ -n "$SAFE_TICKET" ] || { echo "::error::empty/invalid ticketId"; exit 1; }
+          # PR base = the repo's default branch (what we checked out). BASE_SHA = the EXACT commit
+          # Phase A diffed against; branch from it so the patch applies to its true base even if the
+          # default branch advanced between phases. Sanitize the sha to hex before use.
           BASE="$(git -C "$T" symbolic-ref --short HEAD)"
+          BASE_SHA="$(tr -cd '0-9a-fA-F' < "$RUNNER_TEMP/base.sha")"
+          [ -n "$BASE_SHA" ] || { echo "::error::missing base.sha from Phase A"; exit 1; }
           BRANCH="stitch/agent/ticket-$SAFE_TICKET"
-          git -C "$T" checkout -b "$BRANCH"
-          git -C "$T" apply --whitespace=nowarn "$RUNNER_TEMP/copy.patch"
+          git -C "$T" fetch --depth 1 origin "$BASE_SHA"
+          git -C "$T" checkout -b "$BRANCH" "$BASE_SHA"
+          # --3way lets a context-shifted-but-clean hunk still apply; a REAL conflict fails the job
+          # (no PR) rather than producing a garbled file.
+          git -C "$T" apply --3way --whitespace=nowarn "$RUNNER_TEMP/copy.patch"
           # Structural wall #2: the SAME guard, post-apply, defense in depth.
           ( cd "$T" && git diff --name-only --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
           git -C "$T" add -A
