@@ -56,7 +56,7 @@ env:
   # --- OPERATOR: pin this to a published Claude Code CLI image by digest. ------
   # The image ENTRYPOINT must be the Claude Code CLI so the flags below apply.
   # Example shape only -- replace the whole value, keep the @sha256 pin:
-  CLAUDE_CODE_IMAGE: REPLACE_WITH_CLAUDE_CODE_IMAGE@sha256:REPLACE_WITH_IMAGE_DIGEST
+  CLAUDE_CODE_IMAGE: ghcr.io/stitch-tec/claude-code-runner@sha256:87777485dc74d6b0fd296bcc7275f062487c3307575d19eaaa6f4f48d454f54f
 
 jobs:
   # ===========================================================================
