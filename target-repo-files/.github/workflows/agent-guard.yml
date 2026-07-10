@@ -44,13 +44,29 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
+      # Scope: ENFORCE only on agent-authored PRs (branch stitch/agent/*). The runner always
+      # names its branch that (Phase B, trusted code; the agent has no write token to pick another),
+      # so this is un-spoofable by the agent. On a HUMAN PR the job runs but every enforce step
+      # is skipped, so the `guard` required check reports GREEN and normal code PRs stay mergeable —
+      # human review is the gate there. Without this, requiring the check would block ALL code PRs.
+      - name: Scope to agent PRs
+        id: scope
+        run: |
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          case "$HEAD_REF" in
+            stitch/agent/*) echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "Agent PR ($HEAD_REF) — enforcing copy-lane guard." ;;
+            *)              echo "agent=false" >> "$GITHUB_OUTPUT"; echo "Not an agent PR ($HEAD_REF) — guard passes (human review is the gate)." ;;
+          esac
+
       - name: Checkout PR (full history for the base...head diff)
+        if: steps.scope.outputs.agent == 'true'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # actions/checkout v4.2.2 -> pin full commit SHA
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch the pinned guard script from Stitch-TEC/agent-runner
+        if: steps.scope.outputs.agent == 'true'
         env:
           GUARD_SHA: b23a5d7ff270feae21909b3c31be36b73285cb1b
           # Present only if agent-runner is private; empty (harmless) if public.
@@ -71,6 +87,7 @@ jobs:
           chmod +x "$DEST"
 
       - name: Enforce copy-lane path + size policy (fail-closed)
+        if: steps.scope.outputs.agent == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -83,6 +100,7 @@ jobs:
           printf '%s\n' "$DIFF" | sh "$RUNNER_TEMP/check-copy-diff.sh"
 
       - name: Flag new egress hosts added in prose (fail-closed)
+        if: steps.scope.outputs.agent == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
