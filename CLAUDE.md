@@ -37,8 +37,12 @@ implements, and every file is load-bearing against a specific attack.
   target repo's `agent-guard.yml` — they fetch it by SHA on purpose.
 - **Pin everything.** Third-party action SHAs and the container image digest are pinned deliberately; a floating
   tag is a supply-chain hole. Workflow permissions default-none; no `pull_request_target`.
-- **The agent never merges.** Enforced by the App lacking Administration/merge capability **plus** target-repo
-  branch protection. See the status note above — that second half is currently missing on the pilot.
+- **The agent never merges — ⚠️ by POLICY, not capability (corrected 2026-07-14).** The design claims this is
+  structural; it currently isn't. Merging a PR needs **Contents:write**, *not* Administration — and Phase B mints
+  exactly `{contents:'write', pull_requests:'write'}` on the target repo (`feedback-worker/src/index.ts:4572`).
+  So the App **can** merge its own PR; only the workflow declining to call merge stops it, and the pilot ruleset
+  requires **0 approvals and no status checks**. **Seal it** (require `agent-guard` + 1 approval) and this becomes
+  the structural guarantee the design describes. Until then, don't repeat the "by capability" claim.
 - **The agent sees OPERATOR-AUTHORED context only** (locked 2026-07-09). `/agent/brief` returns the operator's
   instruction + approved client context, **never ticket text** — this structurally severs the
   prompt-injection→agent loop. Do not "helpfully" pass the ticket body through.
