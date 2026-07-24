@@ -58,9 +58,9 @@ jobs:
           # (stitch/agent/publish-*) carry EXACT operator-approved content that legitimately
           # contains links — the sha256-pinned deterministic pipeline + human review gate those.
           case "$HEAD_REF" in
-            stitch/agent/publish-*) echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "Agent PUBLISH PR ($HEAD_REF) — enforcing path/size guard (URL rule waived: operator-approved content)." ;;
-            stitch/agent/*)         echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=true"  >> "$GITHUB_OUTPUT"; echo "Agent PR ($HEAD_REF) — enforcing copy-lane guard." ;;
-            *)                      echo "agent=false" >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "Not an agent PR ($HEAD_REF) — guard passes (human review is the gate)." ;;
+            stitch/agent/publish-*) echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "mode=publish" >> "$GITHUB_OUTPUT"; echo "Agent PUBLISH PR ($HEAD_REF) — enforcing path/size guard (URL rule waived: operator-approved content)." ;;
+            stitch/agent/*)         echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=true"  >> "$GITHUB_OUTPUT"; echo "mode=copy"    >> "$GITHUB_OUTPUT"; echo "Agent PR ($HEAD_REF) — enforcing copy-lane guard." ;;
+            *)                      echo "agent=false" >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "mode=copy"    >> "$GITHUB_OUTPUT"; echo "Not an agent PR ($HEAD_REF) — guard passes (human review is the gate)." ;;
           esac
 
       - name: Checkout PR (full history for the base...head diff)
@@ -73,7 +73,10 @@ jobs:
       - name: Fetch the pinned guard script from Stitch-TEC/agent-runner
         if: steps.scope.outputs.agent == 'true'
         env:
-          GUARD_SHA: b23a5d7ff270feae21909b3c31be36b73285cb1b
+          # v2+ (2026-07-23): split size caps (+600/-40, publish mode widens deletions) +
+          # deterministic publish lane. RE-PIN this to the current agent-runner commit whenever
+          # scripts/check-copy-diff.sh changes — a stale pin silently enforces the OLD policy.
+          GUARD_SHA: <REPLACE_WITH_CURRENT_AGENT_RUNNER_COMMIT_SHA>
           # Present only if agent-runner is private; empty (harmless) if public.
           AGENT_RUNNER_READ_TOKEN: ${{ secrets.AGENT_RUNNER_READ_TOKEN }}
         run: |
@@ -96,6 +99,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Publish-lane branches (runner-minted; a PR author can't set this env) widen ONLY the
+          # deletion cap — a re-publish overwrites the prior post verbatim.
+          STITCH_GUARD_MODE: ${{ steps.scope.outputs.mode }}
         run: |
           set -euo pipefail
           # numstat over the exact PR range -> paths + line counts for the caps.

@@ -215,9 +215,10 @@ jobs:
           set -euo pipefail
           T="$RUNNER_TEMP/target"
           # Stage EVERYTHING (a publish is usually a NEW file — plain `git diff` cannot see
-          # untracked files, so the guard and patch both read the STAGED diff).
+          # untracked files, so the guard and patch both read the STAGED diff). Publish mode
+          # widens ONLY the deletion cap (a re-publish overwrites the prior post verbatim).
           git -C "$T" add -A
-          ( cd "$T" && git diff --cached --numstat --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          ( cd "$T" && git diff --cached --numstat --no-renames | STITCH_GUARD_MODE=publish sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
           git -C "$T" diff --cached --no-renames > "$RUNNER_TEMP/copy.patch"
           if [ ! -s "$RUNNER_TEMP/copy.patch" ]; then
             echo "::error::publish produced no change (file already identical?) -- nothing to open a PR for"
@@ -440,9 +441,11 @@ jobs:
           git -C "$T" apply --3way --whitespace=nowarn "$RUNNER_TEMP/copy.patch"
           # Structural wall #2: the SAME guard, post-apply, defense in depth. Stage FIRST so the
           # guard sees NEW files too (plain `git diff` omits untracked paths — a publish is
-          # usually a brand-new file, and it must not be invisible to this wall).
+          # usually a brand-new file, and it must not be invisible to this wall). Mode keyed off
+          # the trusted event type — publish widens only the deletion cap.
           git -C "$T" add -A
-          ( cd "$T" && git diff --cached --numstat --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          if [ "${{ github.event.action }}" = "stitch-agent-publish" ]; then GUARD_MODE=publish; else GUARD_MODE=copy; fi
+          ( cd "$T" && git diff --cached --numstat --no-renames | STITCH_GUARD_MODE="$GUARD_MODE" sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
           # TRUSTED, workflow-authored commit message -- never agent free-text.
           git -C "$T" -c user.name="Stitch Agent" -c user.email="agent@stitchtec.dev" \
             commit -m "$COMMIT_TITLE" \

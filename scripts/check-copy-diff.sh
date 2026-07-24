@@ -56,6 +56,14 @@ set -eu
 MAX_FILES=5
 MAX_ADDED=600
 MAX_DELETED=40
+# PUBLISH MODE (STITCH_GUARD_MODE=publish — set ONLY by trusted workflow code: the runner keys it
+# off the repository_dispatch event type, the target repo's agent-guard off the runner-minted
+# stitch/agent/publish-* branch prefix; a PR author can set neither): a re-publish OVERWRITES the
+# existing post verbatim, so the diff legitimately deletes every changed old line — the deletion
+# cap matches the addition cap there. Copy mode keeps the tight 40-line deletion bound.
+if [ "${STITCH_GUARD_MODE:-copy}" = "publish" ]; then
+  MAX_DELETED=$MAX_ADDED
+fi
 TAB="$(printf '\t')"
 
 fail() {

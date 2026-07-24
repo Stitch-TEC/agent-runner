@@ -1,0 +1,47 @@
+name: pin-check
+
+# =============================================================================
+# GUARD-PIN DRIFT CHECK — fails this repo's CI whenever the guard script at
+# HEAD differs from the script at the template's pinned GUARD_SHA. This is the
+# systematic fix for the trap caught in the 2026-07-23 review: a policy change
+# to scripts/check-copy-diff.sh without a template re-pin ships a template that
+# silently enforces the OLD policy in every newly-enrolled repo.
+#
+# CONTENT comparison (not SHA equality) — pinning the previous commit is fine
+# as long as the script bytes are identical; only a REAL policy drift fails.
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pin_drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2, SHA-pinned
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Template GUARD_SHA must serve the SAME guard script as HEAD
+        run: |
+          set -euo pipefail
+          PIN="$(sed -n 's/^ *GUARD_SHA: *\([0-9a-f]\{40\}\) *$/\1/p' target-repo-files/.github/workflows/agent-guard.yml | head -1)"
+          if [ -z "$PIN" ]; then
+            echo "::error::template GUARD_SHA is not a full 40-char commit SHA (placeholder left in?)"
+            exit 1
+          fi
+          if ! git cat-file -e "$PIN^{commit}" 2>/dev/null; then
+            echo "::error::template GUARD_SHA $PIN is not a commit in this repo"
+            exit 1
+          fi
+          if ! git show "$PIN:scripts/check-copy-diff.sh" | diff -u - scripts/check-copy-diff.sh; then
+            echo "::error::guard script changed but the template's GUARD_SHA still serves the OLD policy — re-pin target-repo-files/.github/workflows/agent-guard.yml (and every enrolled repo)"
+            exit 1
+          fi
+          echo "pin-check: template GUARD_SHA ($PIN) serves the same guard script as HEAD — OK"
