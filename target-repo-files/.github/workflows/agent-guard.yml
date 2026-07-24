@@ -76,7 +76,7 @@ jobs:
           # v2+ (2026-07-23): split size caps (+600/-40, publish mode widens deletions) +
           # deterministic publish lane. RE-PIN this to the current agent-runner commit whenever
           # scripts/check-copy-diff.sh changes — a stale pin silently enforces the OLD policy.
-          GUARD_SHA: <REPLACE_WITH_CURRENT_AGENT_RUNNER_COMMIT_SHA>
+          GUARD_SHA: eb2d1866d562b86c52cdc68d836f5f0821a0b786
           # Present only if agent-runner is private; empty (harmless) if public.
           AGENT_RUNNER_READ_TOKEN: ${{ secrets.AGENT_RUNNER_READ_TOKEN }}
         run: |
