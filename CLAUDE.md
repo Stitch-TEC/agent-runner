@@ -7,11 +7,20 @@ the repo write token. Published as the private `Stitch-TEC/agent-runner`. The **
 **Read `../STAGE-2-AGENT-DESIGN.md` before touching anything here** — it is the threat model this repo
 implements, and every file is load-bearing against a specific attack.
 
-> **Status (2026-07-14): BUILT + LIVE, NOT SEALED.** The lane is deployed and wired (GitHub App 4267006,
-> all secrets set, D1 + R2 live). **Outstanding:** the pilot repo `Stitch-TEC/Stitch-TEC` has
-> `required_approving_review_count: 0` and **no required status checks**, so `agent-guard` runs but nothing
-> blocks a merge over a red guard — meaning *"the agent never merges, by capability"* is currently only policy.
-> Fix = require the `agent-guard` check + set approvals to 1. Until then, treat any agent PR as unmerged-by-luck.
+> **Status (2026-07-23): BUILT + LIVE + SEALED.** The lane is deployed and wired (GitHub App 4267006, all
+> secrets set, D1 + R2 live), and the pilot ruleset (`Stitch-TEC/Stitch-TEC` #18784930) now **requires the
+> `guard` status check + 1 approving review** (repository-admin bypass for the human operator; the App has
+> none) — *"the agent never merges"* is finally **by capability**. `Stitch-TEC/Lyf-Fit` is enrolled the same
+> way (classic branch protection: `guard` required + 1 review). ⚠️ One gap: `AGENT_RUNNER_READ_TOKEN` is not
+> set in either target repo and this repo is private, so the guard's script fetch fails RED (fail-closed —
+> agent PRs are unmergeable, not unguarded) until the operator sets the secret or makes this repo public.
+>
+> **Two lanes since 2026-07-23:** `stitch-agent-copy` (Phase A = Claude Code in the FS jail, prose tweaks
+> from an operator brief) and **`stitch-agent-publish`** — DETERMINISTIC: the dispatcher stores an
+> operator-approved Spool draft (sha256-pinned) and Phase A writes those exact bytes to the staged path.
+> No model call, no AI spend, no brief-injection surface. Publish branches are `stitch/agent/publish-*`
+> (the target-repo guard waives only its no-new-URLs rule there). Guard v2 caps: ≤5 files, ≤600 added,
+> ≤40 deleted lines.
 
 ## Layout
 
@@ -24,9 +33,11 @@ implements, and every file is load-bearing against a specific attack.
 
 ## Invariants — don't break these
 
-- **One repo per install.** The App is installed one repository per installation (each target repo *and* this
-  repo). That scope is the **primary** guarantee a run can only touch the repo it was dispatched for; the
-  dispatcher's response-scope validation is the backstop. **Never widen an installation to "all repositories".**
+- **Small enrolled set, single-repo tokens (policy evolved 2026-07-23 for multi-repo enrollment).** The org
+  installation holds ONLY the enrolled repos (`repository_selection: selected`; the dispatcher's installs
+  audit alerts past `AGENT_ENROLLED_REPOS_MAX`), and every per-run token is minted for EXACTLY the dispatched
+  repo (`repositories:[repo]`, response-validated) — that per-run scope is the primary guarantee a run can
+  only touch its own repo. **Never widen the installation to "all repositories".**
 - **No crown-jewel secret lives here.** The App private key lives ONLY in the dispatcher's secret store. Every
   capability is a short-lived token the dispatcher mints after re-checking server-side. The
   "let the Action mint its own token from repo secrets" shortcut is **rejected outright** — one curious client
@@ -37,12 +48,10 @@ implements, and every file is load-bearing against a specific attack.
   target repo's `agent-guard.yml` — they fetch it by SHA on purpose.
 - **Pin everything.** Third-party action SHAs and the container image digest are pinned deliberately; a floating
   tag is a supply-chain hole. Workflow permissions default-none; no `pull_request_target`.
-- **The agent never merges — ⚠️ by POLICY, not capability (corrected 2026-07-14).** The design claims this is
-  structural; it currently isn't. Merging a PR needs **Contents:write**, *not* Administration — and Phase B mints
-  exactly `{contents:'write', pull_requests:'write'}` on the target repo (`feedback-worker/src/index.ts:4572`).
-  So the App **can** merge its own PR; only the workflow declining to call merge stops it, and the pilot ruleset
-  requires **0 approvals and no status checks**. **Seal it** (require `agent-guard` + 1 approval) and this becomes
-  the structural guarantee the design describes. Until then, don't repeat the "by capability" claim.
+- **The agent never merges — by CAPABILITY since 2026-07-23.** Merging needs the ruleset/protection satisfied:
+  both enrolled repos require the `guard` check + 1 approving review, and the App has no bypass — a
+  Contents:write token alone can no longer merge. Keep it that way: never grant the App a bypass, never drop
+  the required check or the review count when touching rulesets/protection.
 - **The agent sees OPERATOR-AUTHORED context only** (locked 2026-07-09). `/agent/brief` returns the operator's
   instruction + approved client context, **never ticket text** — this structurally severs the
   prompt-injection→agent loop. Do not "helpfully" pass the ticket body through.
