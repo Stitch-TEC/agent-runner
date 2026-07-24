@@ -18,7 +18,9 @@
 #          (.js .jsx .ts .tsx .mjs .cjs .json .lock, package*.json) ; anything
 #          containing "auth" ; .env* ; Dockerfile ; wrangler.* ; *.yml/*.yaml ;
 #          and executable/markup content (*.html .htm .svg .xml .xhtml).
-#   SIZE: at most 5 changed files AND at most 40 changed lines total.
+#   SIZE: at most 5 changed files AND at most 600 ADDED lines AND at most 40 DELETED lines
+#         (v2 2026-07-23 — additions/deletions split so a human-approved publish (a new prose
+#         file) fits while the defacement direction stays tightly capped; see MAX_* below).
 #
 # Any changed path outside the allowlist OR inside the denylist -> exit 1 naming
 # the offending path. Oversize -> exit 1. Unverifiable size -> exit 1. A clean
@@ -43,8 +45,17 @@
 
 set -eu
 
+# SIZE POLICY v2 (2026-07-23, publish lane): additions and deletions are capped SEPARATELY.
+#   * MAX_DELETED=40 -- deletions are the defacement direction (wiping live copy); the original
+#     copy-tweak envelope keeps its tight bound.
+#   * MAX_ADDED=600  -- additions are the publish direction (a full human-approved blog post as a
+#     new prose file). Still small enough that a reviewer reads every line before merging; the
+#     required `guard` check + >=1 approval on enrolled repos is what makes the cap meaningful.
+#   * MAX_FILES=5    -- unchanged.
+# v1 capped TOTAL changed lines at 40, which structurally blocked publishing any real post.
 MAX_FILES=5
-MAX_LINES=40
+MAX_ADDED=600
+MAX_DELETED=40
 TAB="$(printf '\t')"
 
 fail() {
@@ -93,8 +104,9 @@ while IFS= read -r line; do
   esac
 done < "$WORK"
 
-# ---- 3. normalise to a path list + a total changed-line count ---------------
-TOTAL_LINES=0
+# ---- 3. normalise to a path list + added/deleted line counts ----------------
+ADDED_LINES=0
+DELETED_LINES=0
 : > "$PATHS"
 
 if [ "$HAVE_COUNTS" -eq 1 ]; then
@@ -107,14 +119,16 @@ if [ "$HAVE_COUNTS" -eq 1 ]; then
     p="${rest#*"$TAB"}"
     [ "$a" = "-" ] && a=0        # binary file: count as 0 lines (path still checked)
     [ "$d" = "-" ] && d=0
-    TOTAL_LINES=$((TOTAL_LINES + a + d))
+    ADDED_LINES=$((ADDED_LINES + a))
+    DELETED_LINES=$((DELETED_LINES + d))
     printf '%s\n' "$p" >> "$PATHS"
   done < "$WORK"
 else
   # name-only form: the lines are the paths; derive counts from the working tree.
   grep -v '^[[:space:]]*$' "$WORK" > "$PATHS" || true
   if COUNTS="$(git diff --numstat --no-renames 2>/dev/null)"; then
-    TOTAL_LINES=0
+    ADDED_LINES=0
+    DELETED_LINES=0
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       a="${line%%"$TAB"*}"
@@ -123,7 +137,8 @@ else
       [ "$a" = "-" ] && a=0
       [ "$d" = "-" ] && d=0
       case "$a$d" in *[!0-9]*) continue ;; esac
-      TOTAL_LINES=$((TOTAL_LINES + a + d))
+      ADDED_LINES=$((ADDED_LINES + a))
+      DELETED_LINES=$((DELETED_LINES + d))
     done <<EOF
 $COUNTS
 EOF
@@ -174,9 +189,12 @@ fi
 if [ "$FILE_COUNT" -gt "$MAX_FILES" ]; then
   fail "too many files changed ($FILE_COUNT > $MAX_FILES)"
 fi
-if [ "$TOTAL_LINES" -gt "$MAX_LINES" ]; then
-  fail "diff too large ($TOTAL_LINES changed lines > $MAX_LINES)"
+if [ "$ADDED_LINES" -gt "$MAX_ADDED" ]; then
+  fail "too many added lines ($ADDED_LINES > $MAX_ADDED)"
+fi
+if [ "$DELETED_LINES" -gt "$MAX_DELETED" ]; then
+  fail "too many deleted lines ($DELETED_LINES > $MAX_DELETED)"
 fi
 
-echo "check-copy-diff: OK -- $FILE_COUNT file(s), $TOTAL_LINES changed line(s), prose-only." >&2
+echo "check-copy-diff: OK -- $FILE_COUNT file(s), +$ADDED_LINES/-$DELETED_LINES line(s), prose-only." >&2
 exit 0

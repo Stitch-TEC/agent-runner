@@ -53,9 +53,14 @@ jobs:
         id: scope
         run: |
           HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          # Two agent lanes share the path/size guard; the no-new-URLs rule applies ONLY to the
+          # copy lane (model-generated tweaks must not add links). Publish-lane PRs
+          # (stitch/agent/publish-*) carry EXACT operator-approved content that legitimately
+          # contains links — the sha256-pinned deterministic pipeline + human review gate those.
           case "$HEAD_REF" in
-            stitch/agent/*) echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "Agent PR ($HEAD_REF) — enforcing copy-lane guard." ;;
-            *)              echo "agent=false" >> "$GITHUB_OUTPUT"; echo "Not an agent PR ($HEAD_REF) — guard passes (human review is the gate)." ;;
+            stitch/agent/publish-*) echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "Agent PUBLISH PR ($HEAD_REF) — enforcing path/size guard (URL rule waived: operator-approved content)." ;;
+            stitch/agent/*)         echo "agent=true"  >> "$GITHUB_OUTPUT"; echo "urlrule=true"  >> "$GITHUB_OUTPUT"; echo "Agent PR ($HEAD_REF) — enforcing copy-lane guard." ;;
+            *)                      echo "agent=false" >> "$GITHUB_OUTPUT"; echo "urlrule=false" >> "$GITHUB_OUTPUT"; echo "Not an agent PR ($HEAD_REF) — guard passes (human review is the gate)." ;;
           esac
 
       - name: Checkout PR (full history for the base...head diff)
@@ -100,7 +105,7 @@ jobs:
           printf '%s\n' "$DIFF" | sh "$RUNNER_TEMP/check-copy-diff.sh"
 
       - name: Flag new egress hosts added in prose (fail-closed)
-        if: steps.scope.outputs.agent == 'true'
+        if: steps.scope.outputs.urlrule == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

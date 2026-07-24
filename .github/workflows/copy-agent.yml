@@ -34,9 +34,16 @@ name: copy-agent
 #   3. Set repo vars DISPATCHER_URL and AGENT_OIDC_AUDIENCE.
 # =============================================================================
 
+# Two dispatch types, ONE workflow (the dispatcher pins job_workflow_ref, so both lanes must live
+# in this file):
+#   * stitch-agent-copy    — Phase A runs Claude Code in the FS jail (prose tweaks from a brief).
+#   * stitch-agent-publish — DETERMINISTIC: no model call at all. The payload names ONE prose file
+#     and the dispatcher serves its exact, operator-approved bytes (sha256-pinned end to end);
+#     Phase A writes the file verbatim. Safer than the copy lane by construction: nothing
+#     generated, nothing interpreted, no AI spend.
 on:
   repository_dispatch:
-    types: [stitch-agent-copy]
+    types: [stitch-agent-copy, stitch-agent-publish]
 
 # ONLY id-token:write -- this is the load-bearing top-level grant. It lets the
 # job request an OIDC token for callback auth and gives the job's own
@@ -140,9 +147,87 @@ jobs:
           # Make the copy writable by any container uid (we run --user 1000).
           chmod -R a+rwX "$RUNNER_TEMP/target"
 
+      # =======================================================================
+      # PUBLISH MODE (stitch-agent-publish) — deterministic, no model call.
+      # The brief callback returns { publish: { path, contentSha256, content } }
+      # (operator-approved Spool draft bytes, stored server-side at dispatch).
+      # The file is written VERBATIM after an integrity + path-safety check;
+      # the same host-side guard then vets the staged diff.
+      # =======================================================================
+      - name: Fetch publish payload and write the file (deterministic)
+        if: github.event.action == 'stitch-agent-publish'
+        env:
+          PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
+          RUN_ID: ${{ github.event.client_payload.runId }}
+          REPO: ${{ github.event.client_payload.repo }}
+          NONCE: ${{ github.event.client_payload.nonces.brief }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$NONCE"
+          AUD="${PAYLOAD_AUD:-$VAR_AUD}"
+          [ -n "$AUD" ] || { echo "::error::no OIDC audience"; exit 1; }
+          OIDC="$(curl -sS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" | jq -r '.value // empty')"
+          [ -n "$OIDC" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$OIDC"
+          RESP_FILE="$RUNNER_TEMP/brief.json"
+          curl -sS --max-time 30 -X POST "$DISPATCHER_URL/agent/brief" \
+            -H "Authorization: Bearer $OIDC" \
+            -H "X-Stitch-Nonce: $NONCE" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg r "$RUN_ID" --arg repo "$REPO" '{runId:$r,repo:$repo}')" \
+            -o "$RESP_FILE"
+          P_PATH="$(jq -r '.publish.path // empty' "$RESP_FILE")"
+          P_SHA="$(jq -r '.publish.contentSha256 // empty' "$RESP_FILE")"
+          if [ -z "$P_PATH" ] || [ -z "$P_SHA" ]; then
+            echo "::error::brief callback returned no publish payload: $(jq -r '.error // "unknown"' "$RESP_FILE")"
+            exit 1
+          fi
+          # PATH SAFETY (defense in depth — the dispatcher already validated, the guard re-checks):
+          # relative, no '..' segments, no leading '/', no backslash/whitespace/hidden segments.
+          case "$P_PATH" in
+            /*|*..*|*\\*|.*|*/.*|*' '*|*"$(printf '\t')"*) echo "::error::unsafe publish path: $P_PATH"; exit 1 ;;
+          esac
+          case "$P_PATH" in
+            *.md|*.mdx|*.txt) : ;;
+            *) echo "::error::publish path is not a prose file: $P_PATH"; exit 1 ;;
+          esac
+          T="$RUNNER_TEMP/target"
+          CONTENT_FILE="$RUNNER_TEMP/publish-content"
+          jq -rj '.publish.content // ""' "$RESP_FILE" > "$CONTENT_FILE"
+          rm -f "$RESP_FILE"
+          [ -s "$CONTENT_FILE" ] || { echo "::error::publish payload had empty content"; exit 1; }
+          # INTEGRITY: the bytes we are about to commit must hash to the sha the dispatcher pinned
+          # at ticket-creation time (computed from the operator-approved Spool draft).
+          GOT_SHA="$(sha256sum "$CONTENT_FILE" | cut -d' ' -f1)"
+          if [ "$GOT_SHA" != "$P_SHA" ]; then
+            echo "::error::publish content integrity check failed (sha mismatch)"; exit 1
+          fi
+          mkdir -p "$T/$(dirname "$P_PATH")"
+          cp "$CONTENT_FILE" "$T/$P_PATH"
+          rm -f "$CONTENT_FILE"
+          echo "wrote $P_PATH ($(wc -c < "$T/$P_PATH") bytes, sha verified)"
+
+      - name: Guard the staged publish diff and produce the patch (fail-closed)
+        if: github.event.action == 'stitch-agent-publish'
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/target"
+          # Stage EVERYTHING (a publish is usually a NEW file — plain `git diff` cannot see
+          # untracked files, so the guard and patch both read the STAGED diff).
+          git -C "$T" add -A
+          ( cd "$T" && git diff --cached --numstat --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          git -C "$T" diff --cached --no-renames > "$RUNNER_TEMP/copy.patch"
+          if [ ! -s "$RUNNER_TEMP/copy.patch" ]; then
+            echo "::error::publish produced no change (file already identical?) -- nothing to open a PR for"
+            exit 1
+          fi
+
       # --- OIDC + brief nonce -> operator-authored instruction + context -----
       #     NO ticket subject/body ever reaches the agent (DECISIONS LOCKED #2).
       - name: Fetch operator brief (OIDC + brief nonce)
+        if: github.event.action == 'stitch-agent-copy'
         env:
           PAYLOAD_AUD: ${{ github.event.client_payload.oidcAudience }}
           RUN_ID: ${{ github.event.client_payload.runId }}
@@ -191,6 +276,7 @@ jobs:
       #     git/gh. --cap-drop/no-new-privileges are extra hardening on top of the
       #     load-bearing single-mount jail.
       - name: Run Claude Code (filesystem jail)
+        if: github.event.action == 'stitch-agent-copy'
         env:
           GATEWAY_TOKEN: ${{ github.event.client_payload.gatewayToken }}
           # Trusted, workflow-authored preamble. The operator-authored brief is
@@ -224,6 +310,7 @@ jobs:
 
       # --- HOST-SIDE PATH-GUARD + patch -- structural wall #1 ----------------
       - name: Guard the diff and produce the patch (fail-closed)
+        if: github.event.action == 'stitch-agent-copy'
         run: |
           set -euo pipefail
           T="$RUNNER_TEMP/target"
@@ -332,19 +419,34 @@ jobs:
           BASE="$(git -C "$T" symbolic-ref --short HEAD)"
           BASE_SHA="$(tr -cd '0-9a-fA-F' < "$RUNNER_TEMP/base.sha")"
           [ -n "$BASE_SHA" ] || { echo "::error::missing base.sha from Phase A"; exit 1; }
-          BRANCH="stitch/agent/ticket-$SAFE_TICKET"
+          # Branch name is MODE-KEYED and runner-minted (trusted code — Phase A holds no write
+          # token, so the agent can never choose its own branch name): copy runs keep the
+          # stitch/agent/ticket-* prefix; deterministic publishes use stitch/agent/publish-*
+          # (the target repo's agent-guard scopes its no-new-URLs rule to copy branches only —
+          # an operator-approved post legitimately carries links).
+          if [ "${{ github.event.action }}" = "stitch-agent-publish" ]; then
+            BRANCH="stitch/agent/publish-$SAFE_TICKET"
+            COMMIT_TITLE="Stitch publish-lane content (ticket ${SAFE_TICKET})"
+            COMMIT_BODY="Deterministic publish of operator-approved content (sha256-verified). Run ${RUN_ID}. Requires human review; the agent cannot merge."
+          else
+            BRANCH="stitch/agent/ticket-$SAFE_TICKET"
+            COMMIT_TITLE="Stitch copy-lane change (ticket ${SAFE_TICKET})"
+            COMMIT_BODY="Automated prose-only edit. Run ${RUN_ID}. Requires human review; the agent cannot merge."
+          fi
           git -C "$T" fetch --depth 1 origin "$BASE_SHA"
           git -C "$T" checkout -b "$BRANCH" "$BASE_SHA"
           # --3way lets a context-shifted-but-clean hunk still apply; a REAL conflict fails the job
           # (no PR) rather than producing a garbled file.
           git -C "$T" apply --3way --whitespace=nowarn "$RUNNER_TEMP/copy.patch"
-          # Structural wall #2: the SAME guard, post-apply, defense in depth.
-          ( cd "$T" && git diff --name-only --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
+          # Structural wall #2: the SAME guard, post-apply, defense in depth. Stage FIRST so the
+          # guard sees NEW files too (plain `git diff` omits untracked paths — a publish is
+          # usually a brand-new file, and it must not be invisible to this wall).
           git -C "$T" add -A
+          ( cd "$T" && git diff --cached --numstat --no-renames | sh "$GITHUB_WORKSPACE/scripts/check-copy-diff.sh" )
           # TRUSTED, workflow-authored commit message -- never agent free-text.
           git -C "$T" -c user.name="Stitch Agent" -c user.email="agent@stitchtec.dev" \
-            commit -m "Stitch copy-lane change (ticket ${SAFE_TICKET})" \
-                   -m "Automated prose-only edit. Run ${RUN_ID}. Requires human review; the agent cannot merge."
+            commit -m "$COMMIT_TITLE" \
+                   -m "$COMMIT_BODY"
           git -C "$T" push origin "$BRANCH"
           {
             echo "BASE=$BASE"
@@ -361,13 +463,23 @@ jobs:
           # Build the body with indented printf lines (a heredoc's column-1 body
           # would break this YAML literal block). The banner text is TRUSTED and
           # workflow-authored -- never agent free-text.
-          BODY="$(printf '%s\n' \
-            '> **UNREVIEWED — assume hostile until you read every line.**' \
-            '> Copy-lane change (prose only). The agent opened this; it cannot merge.' \
-            '' \
-            "This pull request was opened automatically by the Stitch copy-lane agent for ticket ${SAFE_TICKET}. It contains prose-only changes (Markdown / text / content) that passed the copy path-guard. Review every changed line before merging. The agent has no merge capability — a human must approve and merge.")"
+          if [ "${{ github.event.action }}" = "stitch-agent-publish" ]; then
+            TITLE="Publish · ticket ${SAFE_TICKET} (unreviewed)"
+            BODY="$(printf '%s\n' \
+              '> **UNREVIEWED — read every line before merging.**' \
+              '> Publish-lane content (prose only, deterministic). The agent opened this; it cannot merge.' \
+              '' \
+              "This pull request was opened automatically by the Stitch publish lane for ticket ${SAFE_TICKET}. It contains the EXACT operator-approved content from Spool (sha256-verified end to end — no model generated or altered anything), written to a prose-only path that passed the copy path-guard. Review and merge to publish.")"
+          else
+            TITLE="Copy-lane change · ticket ${SAFE_TICKET} (unreviewed)"
+            BODY="$(printf '%s\n' \
+              '> **UNREVIEWED — assume hostile until you read every line.**' \
+              '> Copy-lane change (prose only). The agent opened this; it cannot merge.' \
+              '' \
+              "This pull request was opened automatically by the Stitch copy-lane agent for ticket ${SAFE_TICKET}. It contains prose-only changes (Markdown / text / content) that passed the copy path-guard. Review every changed line before merging. The agent has no merge capability — a human must approve and merge.")"
+          fi
           PR_URL="$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
-            --title "Copy-lane change · ticket ${SAFE_TICKET} (unreviewed)" \
+            --title "$TITLE" \
             --body "$BODY")"
           # Labels are cosmetic (the banner + branch are the real signal); do not
           # fail the run if they do not exist yet in the repo.
