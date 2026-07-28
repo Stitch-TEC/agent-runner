@@ -11,9 +11,12 @@ implements, and every file is load-bearing against a specific attack.
 > secrets set, D1 + R2 live), and the pilot ruleset (`Stitch-TEC/Stitch-TEC` #18784930) now **requires the
 > `guard` status check + 1 approving review** (repository-admin bypass for the human operator; the App has
 > none) — *"the agent never merges"* is finally **by capability**. `Stitch-TEC/Lyf-Fit` is enrolled the same
-> way (classic branch protection: `guard` required + 1 review). ⚠️ One gap: `AGENT_RUNNER_READ_TOKEN` is not
-> set in either target repo and this repo is private, so the guard's script fetch fails RED (fail-closed —
-> agent PRs are unmergeable, not unguarded) until the operator sets the secret or makes this repo public.
+> way (classic branch protection: `guard` required + 1 review). **This repo is PUBLIC (2026-07-24,
+> operator-delegated call):** the guard's SHA-pinned script fetch needs no credential anywhere — chosen over
+> an `AGENT_RUNNER_READ_TOKEN` PAT because that token would live in EVERY enrolled repo's Actions secrets
+> (readable by any workflow there) and need rotation forever. Nothing here was ever secret (full-history
+> scan: clean); every control is capability-enforced (SHA pins, OIDC+nonces, App permissions, sealed
+> rulesets), so disclosure weakens nothing. Do NOT add secrets to this repo — it is public by design.
 >
 > **Two lanes since 2026-07-23:** `stitch-agent-copy` (Phase A = Claude Code in the FS jail, prose tweaks
 > from an operator brief) and **`stitch-agent-publish`** — DETERMINISTIC: the dispatcher stores an
