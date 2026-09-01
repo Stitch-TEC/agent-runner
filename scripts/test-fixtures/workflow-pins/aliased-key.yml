@@ -1,0 +1,8 @@
+name: aliased-key
+on: push
+x-key: &u uses
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - *u : actions/checkout@v4

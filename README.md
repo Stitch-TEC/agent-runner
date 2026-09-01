@@ -22,6 +22,7 @@ minimal and holds **no crown-jewel secret**.
 |---|---|
 | `.github/workflows/copy-agent.yml` | The runner. Fires on `repository_dispatch: stitch-agent-copy`. Phase A generates a prose diff inside a **Docker filesystem jail**; Phase B opens the PR with a write token minted only then. |
 | `scripts/check-copy-diff.sh` | The **fail-closed prose-only path + size guard**. Single source of truth, run in three places (Phase A, Phase B, and every target repo's `agent-guard`). |
+| `scripts/check-workflow-pins.rb` | CI regression guard that parses every checked-in workflow and requires immutable external action SHAs / Docker digests while allowing local `./` actions and reusable workflows. Independent of the copy-policy `GUARD_SHA` drift check. |
 | `target-repo-files/.github/workflows/agent-guard.yml` | Copy this into **each enrolled client repo**. A required PR check that **fetches** `check-copy-diff.sh` pinned by commit SHA and runs it against the PR diff — it never executes a script taken from the PR head. |
 | `README.md` | This file. |
 

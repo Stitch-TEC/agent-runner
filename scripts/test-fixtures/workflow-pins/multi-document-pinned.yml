@@ -1,0 +1,15 @@
+name: first-document
+on: push
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+---
+name: second-document
+on: push
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@1e60f620b9541d5e24b6f7a6a8c9d7b43e9f6b0a
