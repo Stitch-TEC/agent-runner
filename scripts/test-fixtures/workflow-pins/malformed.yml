@@ -1,0 +1,5 @@
+name: malformed
+on: push
+jobs:
+  check:
+    runs-on: [ubuntu-latest

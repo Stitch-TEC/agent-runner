@@ -1,0 +1,12 @@
+name: valid-pins
+on: push
+jobs:
+  reusable:
+    uses: ./.github/workflows/local.yml
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: github/codeql-action/analyze@b611370bb5703a7efb587f9ee16742d76b58c6e5
+      - uses: "docker://ghcr.io/example/checker:1.2.3@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      - uses: ./tools/local-action

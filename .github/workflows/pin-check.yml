@@ -9,6 +9,11 @@ name: pin-check
 #
 # CONTENT comparison (not SHA equality) — pinning the previous commit is fine
 # as long as the script bytes are identical; only a REAL policy drift fails.
+#
+# The workflow-reference pin guard below is an independent supply-chain check.
+# It scans every checked-in workflow (including target templates) and rejects
+# floating external action tags/branches and non-digest Docker actions. It does
+# not replace, relax, or share state with the GUARD_SHA content-drift check.
 # =============================================================================
 
 on:
@@ -28,6 +33,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: All workflow references must be immutable
+        run: ruby scripts/check-workflow-pins.rb
+      - name: Workflow-reference guard must fail closed
+        run: sh scripts/test-workflow-pins.sh
       - name: Template GUARD_SHA must serve the SAME guard script as HEAD
         run: |
           set -euo pipefail
