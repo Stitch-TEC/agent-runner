@@ -70,7 +70,7 @@ jobs:
   # PHASE A -- generate the prose diff inside a filesystem jail. No write token.
   # ===========================================================================
   agent:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Hard wall-clock cap: the dispatcher's ledger reserves ~15 Actions-minutes of headroom per run
     # ($0.12), so a hung step must not run to GitHub's 6-HOUR default. 12 here + 6 in open_pr keeps a
     # run's real Actions minutes near the reservation (server-side reconcile caps the charge anyway).
@@ -343,7 +343,7 @@ jobs:
   # ===========================================================================
   open_pr:
     needs: agent
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 6   # wall-clock cap (see the agent job) — checkout+apply+push+PR is quick
     permissions:
       id-token: write
